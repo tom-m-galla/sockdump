@@ -7,6 +7,7 @@ import signal
 import resource
 import ctypes as ct
 import multiprocessing
+import os
 
 from bcc import BPF
 
@@ -250,6 +251,7 @@ PCAP_LINK_TYPE = 147    # USER_0
 PACKET_SIZE = ct.sizeof(Packet)
 
 packet_count = 0
+flush_after_each_packet = False
 
 def parse_event(event, size):
     global packet_count
@@ -277,11 +279,13 @@ def print_header(packet, data):
         packet.path.decode(), len(data), packet.len))
 
 def string_output(cpu, event, size):
+    global flush_after_each_packet
+
     packet, data = parse_event(event, size)
     print_header(packet, data)
     if packet.flags & SS_PACKET_F_ERR:
         print('error')
-    print(str(data.raw, encoding='ascii', errors='ignore'), end='', flush=True)
+    print(str(data.raw, encoding='ascii', errors='ignore'), end='', flush=flush_after_each_event)
 
 def ascii(c):
     if c < 32 or c > 126:
@@ -304,18 +308,26 @@ def hexstring_print(data):
     print(''.join(chunks))
 
 def hex_output(cpu, event, size):
+    global flush_after_each_packet
+
     packet, data = parse_event(event, size)
     print_header(packet, data)
     if packet.flags & SS_PACKET_F_ERR:
         print('error')
     hex_print(data)
+    if flush_after_each_packet:
+        sys.stdout.flush()
 
 def hexstring_output(cpu, event, size):
+    global flush_after_each_packet
+
     packet, data = parse_event(event, size)
     print_header(packet, data)
     if packet.flags & SS_PACKET_F_ERR:
         print('error')
     hexstring_print(data)
+    if flush_after_each_packet:
+        sys.stdout.flush()
 
 def pcap_write_header(snaplen, network):
     header = struct.pack('=IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, snaplen, network)
@@ -327,6 +339,8 @@ def pcap_write_record(ts_sec, ts_usec, orig_len, data):
     sys.stdout.write(data)
 
 def pcap_output(cpu, event, size):
+    global flush_after_each_packet
+
     packet, data = parse_event(event, size)
 
     ts = time.time()
@@ -337,6 +351,10 @@ def pcap_output(cpu, event, size):
     data = header + data
     size = len(header) + packet.len
     pcap_write_record(ts_sec, ts_usec, size, data)
+
+    if flush_after_each_packet:
+        print('Flushing ...', file=sys.stderr)
+        sys.stdout.flush()
 
 outputs = {
     'hex': hex_output,
@@ -350,6 +368,8 @@ def sig_handler(signum, stack):
     sys.exit(signum)
 
 def main(args):
+    global flush_after_each_packet
+
     text = render_text(bpf_text, args.seg_size, args.segs_per_msg, args.sock, args.pid)
 
     if args.bpf:
@@ -375,14 +395,22 @@ def main(args):
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
+    flush_after_each_packet = args.flush
+
     if args.format == 'pcap':
-        sys.stdout = open(args.output, 'wb')
+        if args.output != '/dev/stdout':
+            sys.stdout = open(args.output, 'wb')
+        else:
+            sys.stdout.flush() # fflush buffer of current stdout
+            sys.stdout = os.fdopen(sys.stdout.fileno(), 'wb') # fdopen as binary
+            # sys.stdout = sys.stdout.buffer
         pcap_write_header(args.seg_size, PCAP_LINK_TYPE)
     else:
         if args.output != '/dev/stdout':
             sys.stdout = open(args.output, 'w')
 
     print('waiting for data', file=sys.stderr)
+
     while 1:
         b.perf_buffer_poll()
 
@@ -408,6 +436,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--output', default='/dev/stdout',
         help='output file')
+    parser.add_argument(
+        '--flush', action='store_true',
+        help='flush output after writing each packet')
     parser.add_argument(
         '--pid', default=None,
         help='Pid filter, default no filter')
