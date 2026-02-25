@@ -353,6 +353,7 @@ def pcap_output(cpu, event, size):
     pcap_write_record(ts_sec, ts_usec, size, data)
 
     if flush_after_each_packet:
+        print('Flushing ...', file=sys.stderr)
         sys.stdout.flush()
 
 outputs = {
